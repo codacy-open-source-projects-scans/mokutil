@@ -89,6 +89,7 @@
 #define UNTRUST_MOK        (1 << 28)
 #define SET_SBAT           (1 << 29)
 #define SET_SSP            (1 << 30)
+#define IS_SB_ENABLED      (1 << 31)
 
 #define DEFAULT_CRYPT_METHOD SHA512_BASED
 #define DEFAULT_SALT_SIZE    SHA512_SALT_MAX
@@ -129,6 +130,7 @@ print_help ()
 	printf ("  --disable-validation\t\t\tDisable signature validation\n");
 	printf ("  --enable-validation\t\t\tEnable signature validation\n");
 	printf ("  --sb-state\t\t\t\tShow SecureBoot State\n");
+	printf ("  --is-sb-enabled\t\t\tIndicates if SecureBoot is enabled or not\n");
 	printf ("  --test-key, -t <der file>\t\tTest if the key is enrolled or not\n");
 	printf ("  --reset\t\t\t\tReset MOK list\n");
 	printf ("  --generate-hash[=password], -g\tGenerate the password hash\n");
@@ -1400,7 +1402,7 @@ enable_validation(void)
 }
 
 static int
-sb_state ()
+sb_state_internal ()
 {
 	uint8_t *data = NULL;
 	size_t data_size;
@@ -1408,6 +1410,7 @@ sb_state ()
 	int32_t secureboot = -1;
 	int32_t setupmode = -1;
 	int32_t moksbstate = -1;
+	int ret = 0;
 
 	if (efi_get_variable (efi_guid_global, "SecureBoot", &data, &data_size,
 			      &attributes) < 0) {
@@ -1453,17 +1456,34 @@ sb_state ()
 
 	if (secureboot == 1 && setupmode == 0) {
 		printf ("SecureBoot enabled\n");
+		ret = 0;
 		if (moksbstate == 1)
 			printf ("SecureBoot validation is disabled in shim\n");
 	} else if (secureboot == 0 || setupmode == 1) {
 		printf ("SecureBoot disabled\n");
+		ret = 1;
 		if (setupmode == 1)
 			printf ("Platform is in Setup Mode\n");
 	} else {
 		printf ("Cannot determine secure boot state.\n");
 	}
 
-	return 0;
+	return ret;
+}
+
+static int
+sb_state ()
+{
+	int ret = sb_state_internal ();
+
+	/* in this case, ignore the ret value except on failure */
+	return (ret < 0)? ret: 0;
+}
+
+static int
+is_sb_enabled ()
+{
+	return sb_state_internal ();
 }
 
 static inline int
@@ -1567,10 +1587,10 @@ test_key (const MokRequest req, const char *key_file)
 
 	if (is_valid_request (&efi_guid_x509_cert, key, read_size, req)) {
 		printf ("%s is not enrolled\n", key_file);
-		ret = 0;
+		ret = 1;
 	} else {
 		print_skip_message (key_file, key, read_size, req);
-		ret = 1;
+		ret = 0;
 	}
 
 error:
@@ -1855,6 +1875,7 @@ main (int argc, char *argv[])
 			{"disable-validation", no_argument,       0, 0  },
 			{"enable-validation",  no_argument,       0, 0  },
 			{"sb-state",           no_argument,       0, 0  },
+			{"is-sb-enabled",      no_argument,       0, 0  },
 			{"test-key",           required_argument, 0, 't'},
 			{"reset",              no_argument,       0, 0  },
 			{"hash-file",          required_argument, 0, 'f'},
@@ -1908,6 +1929,8 @@ main (int argc, char *argv[])
 				command |= ENABLE_VALIDATION;
 			} else if (strcmp (option, "sb-state") == 0) {
 				command |= SB_STATE;
+			} else if (strcmp (option, "is-sb-enabled") == 0) {
+				command |= IS_SB_ENABLED;
 			} else if (strcmp (option, "reset") == 0) {
 				command |= RESET;
 			} else if (strcmp (option, "ignore-db") == 0) {
@@ -2156,13 +2179,24 @@ main (int argc, char *argv[])
 	if (pw_hash_file && use_root_pw)
 		command |= HELP;
 
-	if (!(command & HELP) && !efi_variables_supported ()) {
-		fprintf (stderr, "EFI variables are not supported on this system\n");
-		exit (1);
-	}
 
 	if (db_name != MOK_LIST_RT && !(command & ~MOKX))
 		command |= LIST_ENROLLED;
+
+	/* no matter if mokutil is supported (EFI) or not (BIOS) in the system, print
+	   the help menu if no command line arguments provided or explicit help
+	   requested */
+	if (!command || (command & HELP)) {
+		print_help ();
+		ret = 0;
+		goto out;
+	}
+
+	/* check if EFI variable is supported on the system */
+	if (!efi_variables_supported ()) {
+		fprintf (stderr, "EFI variables are not supported on this system\n");
+		exit (1);
+	}
 
 	sb_check = !(command & HELP || command & TEST_KEY ||
 		     command & VERBOSITY || command & TIMEOUT ||
@@ -2246,6 +2280,9 @@ main (int argc, char *argv[])
 			break;
 		case SB_STATE:
 			ret = sb_state ();
+			break;
+		case IS_SB_ENABLED:
+			ret = is_sb_enabled ();
 			break;
 		case TEST_KEY:
 			ret = test_key (ENROLL_MOK, key_file);
